@@ -1,13 +1,16 @@
 import os
 import json
 import logging
+from dotenv import load_dotenv
 from scapy.all import ARP, Ether, srp
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, JobQueue
 
-TELEGRAM_API_KEY = ''
-CHAT_ID = ''
-TRUSTED_DEVICES_FILE = ''
+load_dotenv()
+TELEGRAM_API_KEY = os.getenv("TELEGRAM_API_KEY")
+CHAT_ID = os.getenv("CHAT_ID")
+TRUSTED_DEVICES_FILE = os.getenv("TRUSTED_DEVICES_FILE", "trusted_devices.json")
+
 
 # Funciones auxiliares para dispositivos confiables
 def load_trusted_devices():
