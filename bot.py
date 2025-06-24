@@ -10,7 +10,7 @@ load_dotenv()
 TELEGRAM_API_KEY = os.getenv("TELEGRAM_API_KEY")
 CHAT_ID = os.getenv("CHAT_ID")
 TRUSTED_DEVICES_FILE = os.getenv("TRUSTED_DEVICES_FILE", "trusted_devices.json")
-
+WHITELIST_PATH = "whitelist.json"
 
 # Funciones auxiliares para dispositivos confiables
 def load_trusted_devices():
@@ -35,6 +35,34 @@ def scan_network():
     for element in answered_list:
         devices[element[1].psrc] = element[1].hwsrc
     return devices
+
+# Funciones auxiliares para whitelist con MAC y nombre
+def load_whitelist():
+    if os.path.exists(WHITELIST_PATH):
+        with open(WHITELIST_PATH, "r") as f:
+            return json.load(f)
+    return []
+
+def save_whitelist(whitelist):
+    with open(WHITELIST_PATH, "w") as f:
+        json.dump(whitelist, f, indent=2)
+
+def add_trusted_entry(name, mac):
+    whitelist = load_whitelist()
+    if any(entry["mac"].lower() == mac.lower() for entry in whitelist):
+        return False, "⚠️ Ya existe un dispositivo con esa MAC."
+    whitelist.append({"name": name, "mac": mac})
+    save_whitelist(whitelist)
+    return True, f"✅ Dispositivo '{name}' con MAC {mac} agregado a la whitelist."
+
+def remove_trusted_entry(mac):
+    whitelist = load_whitelist()
+    new_whitelist = [entry for entry in whitelist if entry["mac"].lower() != mac.lower()]
+    if len(new_whitelist) == len(whitelist):
+        return False, "❌ No se encontró un dispositivo con esa MAC."
+    save_whitelist(new_whitelist)
+    return True, "🗑️ Dispositivo eliminado de la whitelist."
+
 
 # Comando /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -71,18 +99,36 @@ async def manual_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(message)
 
-# Comando /trusted: Lista de dispositivos confiables
+# /trusted
 async def list_trusted_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    trusted_devices = load_trusted_devices()
-
-    if trusted_devices:
+    whitelist = load_whitelist()
+    if whitelist:
         message = "🔒 Dispositivos confiables:\n"
-        for mac, alias in trusted_devices.items():
-            message += f"MAC: {mac}, Alias: {alias}\n"
+        for entry in whitelist:
+            message += f"Nombre: {entry['name']}, MAC: {entry['mac']}\n"
     else:
         message = "🚫 No hay dispositivos confiables registrados."
-
     await update.message.reply_text(message)
+
+
+# /add_trusted nombre MAC
+async def add_trusted(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        name, mac = context.args
+        success, msg = add_trusted_entry(name, mac)
+        await update.message.reply_text(msg)
+    except ValueError:
+        await update.message.reply_text("⚠️ Uso correcto: /add_trusted nombre MAC")
+
+# /remove_trusted MAC
+async def remove_trusted(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        mac = context.args[0]
+        success, msg = remove_trusted_entry(mac)
+        await update.message.reply_text(msg)
+    except IndexError:
+        await update.message.reply_text("⚠️ Uso correcto: /remove_trusted MAC")
+
 
 # Manejo de nuevos dispositivos y alias
 async def handle_trust_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -138,6 +184,9 @@ def main():
     application.add_handler(CommandHandler('help', help_command))
     application.add_handler(CommandHandler('scan', manual_scan))
     application.add_handler(CommandHandler('trusted', list_trusted_devices))
+    application.add_handler(CommandHandler("add_trusted", add_trusted))
+    application.add_handler(CommandHandler("remove_trusted", remove_trusted))
+
 
     # Agregar un manejador para mensajes no reconocidos
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_trust_request))
