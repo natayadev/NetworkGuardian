@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import socket
 from dotenv import load_dotenv
 from scapy.all import ARP, Ether, srp
 from telegram import Update
@@ -11,6 +12,26 @@ TELEGRAM_API_KEY = os.getenv("TELEGRAM_API_KEY")
 CHAT_ID = os.getenv("CHAT_ID")
 TRUSTED_DEVICES_FILE = os.getenv("TRUSTED_DEVICES_FILE", "trusted_devices.json")
 WHITELIST_PATH = "whitelist.json"
+
+def get_local_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # Conectar a una IP pública cualquiera (Google DNS)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+    except Exception:
+        ip = "127.0.0.1"
+    finally:
+        s.close()
+    return ip
+
+def get_local_network():
+    ip = get_local_ip()
+    parts = ip.split('.')
+    # Retorna la subred, por ejemplo: "192.168.1.1/24"
+    network = '.'.join(parts[:3]) + '.1/24'
+    return network
+
 
 # Funciones auxiliares para dispositivos confiables
 def load_trusted_devices():
@@ -26,7 +47,7 @@ def save_trusted_devices(devices):
 # Escaneo de red
 def scan_network():
     devices = {}
-    target_ip = "192.168.0.1/24"  # Cambiar según tu red
+    target_ip =  get_local_network()
     arp_request = ARP(pdst=target_ip)
     broadcast = Ether(dst="ff:ff:ff:ff:ff:ff")
     arp_request_broadcast = broadcast / arp_request
@@ -43,9 +64,13 @@ def load_whitelist():
             return json.load(f)
     return []
 
-def save_whitelist(whitelist):
+def save_whitelist(data):
     with open(WHITELIST_PATH, "w") as f:
-        json.dump(whitelist, f, indent=2)
+        json.dump(data, f, indent=4)
+
+def get_trusted_macs():
+    whitelist = load_whitelist()
+    return [entry['mac'].lower() for entry in whitelist]
 
 def add_trusted_entry(name, mac):
     whitelist = load_whitelist()
@@ -78,18 +103,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/start - Inicia el bot. \n"
         "/scan - Escanea manualmente la red y muestra dispositivos no confiables. \n"
         "/trusted - Muestra los dispositivos confiables registrados. \n"
-        "Escribe una dirección MAC para confiar en un dispositivo. 💻🔒"
     )
     await update.message.reply_text(help_text)
 
 # Comando /scan: Escaneo manual
 async def manual_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     devices = scan_network()
-    trusted_devices = load_trusted_devices()
+    trusted_macs = get_trusted_macs()
 
     new_devices = []
     for ip, mac in devices.items():
-        if mac not in trusted_devices:
+        if mac.lower() not in trusted_macs:
             new_devices.append(f"IP: {ip}, MAC: {mac}")
 
     if new_devices:
@@ -99,13 +123,14 @@ async def manual_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(message)
 
+
 # /trusted
 async def list_trusted_devices(update: Update, context: ContextTypes.DEFAULT_TYPE):
     whitelist = load_whitelist()
     if whitelist:
         message = "🔒 Dispositivos confiables:\n"
         for entry in whitelist:
-            message += f"Nombre: {entry['name']}, MAC: {entry['mac']}\n"
+            message += f"MAC: {entry['mac']}, Alias: {entry['name']}\n"
     else:
         message = "🚫 No hay dispositivos confiables registrados."
     await update.message.reply_text(message)
@@ -132,16 +157,31 @@ async def remove_trusted(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Manejo de nuevos dispositivos y alias
 async def handle_trust_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    mac_address = update.message.text.strip()
-    trusted_devices = load_trusted_devices()
-
-    if mac_address in trusted_devices:
-        await update.message.reply_text(f"🔐 El dispositivo con MAC {mac_address} ya es confiable.")
+    text = update.message.text.strip()
+    # Asumimos que si el texto tiene 17 caracteres y formato MAC (xx:xx:xx:xx:xx:xx) es MAC
+    if len(text) == 17 and text.count(":") == 5:
+        mac_address = text.lower()
+        whitelist = load_whitelist()
+        macs = [entry['mac'].lower() for entry in whitelist]
+        if mac_address in macs:
+            await update.message.reply_text(f"🔐 El dispositivo con MAC {mac_address} ya es confiable.")
+        else:
+            await update.message.reply_text(
+                f"Nuevo dispositivo detectado con MAC {mac_address}. Envíame el alias que quieres asignarle. ✨"
+            )
+            context.user_data['mac_address'] = mac_address
     else:
-        await update.message.reply_text(
-            f"Nuevo dispositivo detectado con MAC {mac_address}. Envíame el alias que quieres asignarle. ✨"
-        )
-        context.user_data['mac_address'] = mac_address
+        # Si se espera alias, se guarda el alias
+        mac_address = context.user_data.get('mac_address')
+        if mac_address:
+            alias = text
+            whitelist = load_whitelist()
+            whitelist.append({"mac": mac_address, "name": alias})
+            save_whitelist(whitelist)
+            await update.message.reply_text(f"🔒 El dispositivo {mac_address} ahora es confiable con alias '{alias}'.")
+            context.user_data.clear()
+        else:
+            await update.message.reply_text("❌ No reconozco ese comando o formato. Usa /help para ayuda.")
 
 # Comando para confiar en un dispositivo
 async def trust_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -161,10 +201,10 @@ async def trust_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Notificación de dispositivos no confiables
 async def notify_new_devices(context: ContextTypes.DEFAULT_TYPE):
     devices = scan_network()
-    trusted_devices = load_trusted_devices()
+    trusted_macs = get_trusted_macs()
 
     for ip, mac in devices.items():
-        if mac not in trusted_devices:
+        if mac.lower() not in trusted_macs:
             message = f"⚠️ Nuevo dispositivo con MAC {mac} detectado en la red."
             await context.bot.send_message(chat_id=CHAT_ID, text=message)
 
@@ -172,34 +212,23 @@ async def notify_new_devices(context: ContextTypes.DEFAULT_TYPE):
 async def invalid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Comando no reconocido. Escribe /help para ver los comandos disponibles.")
 
-# Configuración principal
 def main():
     logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
-    # Crear la aplicación
     application = Application.builder().token(TELEGRAM_API_KEY).build()
 
-    # Agregar manejadores de comandos
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('help', help_command))
     application.add_handler(CommandHandler('scan', manual_scan))
     application.add_handler(CommandHandler('trusted', list_trusted_devices))
-    application.add_handler(CommandHandler("add_trusted", add_trusted))
-    application.add_handler(CommandHandler("remove_trusted", remove_trusted))
 
-
-    # Agregar un manejador para mensajes no reconocidos
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_trust_request))
-    application.add_handler(MessageHandler(filters.TEXT, trust_device))
 
-    # Agregar manejador para comandos no válidos
     application.add_handler(MessageHandler(filters.COMMAND, invalid_command))
 
-    # Configurar JobQueue para tareas periódicas
     job_queue: JobQueue = application.job_queue
-    job_queue.run_repeating(notify_new_devices, interval=30, first=0)
+    #job_queue.run_repeating(notify_new_devices, interval=30, first=0)
 
-    # Ejecutar el bot
     application.run_polling()
 
 if __name__ == '__main__':
